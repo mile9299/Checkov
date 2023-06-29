@@ -189,8 +189,8 @@ class Sarif:
                             "physicalLocation": {
                                 "artifactLocation": {"uri": record.repo_file_path.lstrip("/")},
                                 "region": {
-                                    "startLine": int(record.file_line_range[0]) or 1,
-                                    "endLine": int(record.file_line_range[1]) or 1,
+                                    "startLine": int(record.file_line_range[0] or 1) ,
+                                    "endLine": int(record.file_line_range[1] or 1) ,
                                     "snippet": {"text": "".join(line for _, line in record.code_block)},
                                 },
                             }
