@@ -191,7 +191,7 @@ class Sarif:
                                 "region": {
                                     "startLine": int(record.file_line_range[0] or 1) ,
                                     "endLine": int(record.file_line_range[1] or 1) ,
-                                    "snippet": {"text": "".join(line for _, line in record.code_block)},
+                                    "snippet": {"text": "".join(line for _, line in (record.code_block or []) )},
                                 },
                             }
                         }
