@@ -4,12 +4,12 @@ import logging
 import os
 import platform
 
-from typing import Type, Optional
+from typing import Type, Optional, Any
 
 import pathlib
 
 from checkov.common.graph.checks_infra.registry import BaseRegistry
-from checkov.common.typing import LibraryGraphConnector
+from checkov.common.typing import LibraryGraphConnector, TFDefinitionKeyType
 from checkov.common.graph.graph_builder.consts import GraphSource
 from checkov.terraform.modules.module_objects import TFDefinitionKey
 from checkov.terraform.graph_builder.graph_components.block_types import BlockType
@@ -128,7 +128,7 @@ class Runner(TerraformRunner):
                             report.add_resource(f'{vertex.path}:{resource_id}')
                 self.graph_manager.save_graph(self.tf_plan_local_graph)
                 if self._should_run_deep_analysis:
-                    tf_local_graph = self._create_terraform_graph()
+                    tf_local_graph = self._create_terraform_graph(runner_filter)
 
         if external_checks_dir:
             for directory in external_checks_dir:
@@ -181,11 +181,12 @@ class Runner(TerraformRunner):
             return graph_report
         return self.get_graph_checks_report(root_folder, runner_filter)
 
-    def _create_terraform_graph(self) -> TerraformLocalGraph:
+    def _create_terraform_graph(self, runner_filter) -> TerraformLocalGraph:
         graph_manager = TerraformGraphManager(db_connector=self.db_connector)
         tf_local_graph, _ = graph_manager.build_graph_from_source_directory(
             self.repo_root_for_plan_enrichment,
-            render_variables=True
+            render_variables=True,
+            download_external_modules=runner_filter.download_external_modules
         )
         self.graph_manager = graph_manager
         return tf_local_graph
@@ -200,7 +201,7 @@ class Runner(TerraformRunner):
                                    block_type, runner_filter)
 
     @staticmethod
-    def _get_file_path(full_file_path: str | TFDefinitionKey, root_folder: str | pathlib.Path) -> tuple[str, str]:
+    def _get_file_path(full_file_path: TFDefinitionKeyType, root_folder: str | pathlib.Path) -> tuple[str, str]:
         if isinstance(full_file_path, TFDefinitionKey):
             full_file_path = full_file_path.file_path
         if platform.system() == "Windows":
@@ -259,12 +260,12 @@ class Runner(TerraformRunner):
                     record.set_guideline(check.guideline)
                     report.add_record(record=record)
 
-    def get_entity_context_and_evaluations(self, entity):
+    def get_entity_context_and_evaluations(self, entity: dict[str, Any]) -> dict[str, Any] | None:
         entity_id = entity[TF_PLAN_RESOURCE_ADDRESS]
         raw_context = self.context.get(entity[CustomAttributes.FILE_PATH], {}).get(entity_id)
         if raw_context:
             raw_context['definition_path'] = entity[CustomAttributes.BLOCK_NAME].split('.')
-        return raw_context, None
+        return raw_context
 
     def get_entity_context(self, definition_path, full_file_path, entity):
         if len(definition_path) > 1:

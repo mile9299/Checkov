@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import logging
 import os
-from copy import deepcopy
-from typing import Optional, Dict, Mapping, Set, Tuple, Callable, Any, List
+from typing import Optional, Dict, Mapping, Set, Tuple, Callable, Any, List, TYPE_CHECKING
 
 import deep_merge
 
 from checkov.common.runners.base_runner import filter_ignored_paths, IGNORE_HIDDEN_DIRECTORY_ENV, strtobool
 from checkov.common.util.consts import DEFAULT_EXTERNAL_MODULES_DIR, RESOLVED_MODULE_ENTRY_NAME
+from checkov.common.util.data_structures_utils import pickle_deepcopy
 from checkov.common.util.type_forcers import force_list
 from checkov.common.variables.context import EvaluationContext
 from checkov.terraform.graph_builder.graph_components.block_types import BlockType
@@ -22,6 +22,9 @@ from checkov.common.util.parser_utils import get_tf_definition_key_from_module_d
 from checkov.terraform.modules.module_utils import load_or_die_quietly, safe_index, \
     remove_module_dependency_from_path, get_module_dependency_map, get_module_dependency_map_support_nested_modules, \
     clean_parser_types, serialize_definitions
+
+if TYPE_CHECKING:
+    from checkov.terraform import TFDefinitionKey
 
 
 def _filter_ignored_paths(root: str, paths: list[str], excluded_paths: list[str] | None) -> None:
@@ -550,6 +553,21 @@ class Parser:
 
         return module, tf_definitions
 
+    def parse_multi_graph_hcl_module(
+        self,
+        source_dir: str,
+        source: str,
+        download_external_modules: bool = False,
+        external_modules_download_path: str = DEFAULT_EXTERNAL_MODULES_DIR,
+        parsing_errors: dict[str, Exception] | None = None,
+        excluded_paths: list[str] | None = None,
+        vars_files: list[str] | None = None,
+        external_modules_content_cache: dict[str, ModuleContent | None] | None = None,
+        create_graph: bool = True,
+    ) -> list[tuple[Module, list[dict[TFDefinitionKey, dict[str, Any]]]]]:
+        # just added for typing purposes, it is only usde via the new parser
+        return []
+
     def _remove_unused_path_recursive(self, path):
         self.out_definitions.pop(path, None)
         for key in list(self.module_to_resolved.keys()):
@@ -591,7 +609,7 @@ class Parser:
             dep_index_mapping=dep_index_mapping,
         )
         self.add_tfvars(module, source)
-        copy_of_tf_definitions = deepcopy(tf_definitions)
+        copy_of_tf_definitions = pickle_deepcopy(tf_definitions)
         for file_path, blocks in copy_of_tf_definitions.items():
             for block_type in blocks:
                 try:

@@ -34,7 +34,7 @@ from checkov.common.output.report import Report
 from checkov.common.parallelizer.parallel_runner import parallel_runner
 from checkov.common.runners.base_runner import BaseRunner, filter_ignored_paths
 from checkov.common.typing import _CheckResult
-from checkov.common.util.dockerfile import is_docker_file
+from checkov.common.util.dockerfile import is_dockerfile
 from checkov.common.util.secrets import omit_secret_value_from_line
 from checkov.runner_filter import RunnerFilter
 from checkov.secrets.consts import ValidationStatus, VerifySecretsResult
@@ -110,6 +110,7 @@ class Runner(BaseRunner[None]):
             {'name': 'BasicAuthDetector'},
             {'name': 'CloudantDetector'},
             {'name': 'IbmCloudIamDetector'},
+            {'name': 'JwtTokenDetector'},
             {'name': 'MailchimpDetector'},
             {'name': 'PrivateKeyDetector'},
             {'name': 'SlackDetector'},
@@ -134,7 +135,7 @@ class Runner(BaseRunner[None]):
             policies_list = customer_run_config.get('secretsPolicies', [])
             suppressions = customer_run_config.get('suppressions', [])
             if suppressions:
-                secret_suppressions_id = [suppression['checkovPolicyId'] for suppression in suppressions if suppression['suppressionType'] == 'SecretsPolicy']
+                secret_suppressions_id = [suppression['policyId'] for suppression in suppressions if suppression['suppressionType'] == 'SecretsPolicy']
             if policies_list:
                 runnable_plugins: dict[str, str] = get_runnable_plugins(policies_list)
                 logging.info(f"Found {len(runnable_plugins)} runnable plugins")
@@ -191,12 +192,12 @@ class Runner(BaseRunner[None]):
                             filter_ignored_paths(root, f_names, excluded_paths)
                         for file in f_names:
                             if enable_secret_scan_all_files:
-                                if is_docker_file(file):
+                                if is_dockerfile(file):
                                     if 'dockerfile' not in block_list_secret_scan_lower:
                                         files_to_scan.append(os.path.join(root, file))
                                 elif f".{file.split('.')[-1]}" not in block_list_secret_scan_lower:
                                     files_to_scan.append(os.path.join(root, file))
-                            elif file not in PROHIBITED_FILES and f".{file.split('.')[-1]}" in SUPPORTED_FILE_EXTENSIONS or is_docker_file(
+                            elif file not in PROHIBITED_FILES and f".{file.split('.')[-1]}" in SUPPORTED_FILE_EXTENSIONS or is_dockerfile(
                                     file):
                                 files_to_scan.append(os.path.join(root, file))
                     logging.info(f'Secrets scanning will scan {len(files_to_scan)} files')
@@ -221,12 +222,9 @@ class Runner(BaseRunner[None]):
                     added_by = enriched_potential_secret.get('added_by') or ''
                     removed_date = enriched_potential_secret.get('removed_date') or ''
                     added_date = enriched_potential_secret.get('added_date') or ''
-                check_id = getattr(secret, "check_id", SECRET_TYPE_TO_ID.get(secret.type))
+                check_id = secret.check_id if secret.check_id else SECRET_TYPE_TO_ID.get(secret.type)
                 if not check_id:
                     logging.debug(f'Secret was filtered - no check_id for line_number {secret.line_number}')
-                    continue
-                if check_id in secret_suppressions_id:
-                    logging.debug(f'Secret was filtered - check {check_id} was suppressed')
                     continue
                 secret_key = f'{key}_{secret.line_number}_{secret.secret_hash}'
                 if secret.secret_value and is_potential_uuid(secret.secret_value):
@@ -240,6 +238,9 @@ class Runner(BaseRunner[None]):
                 else:
                     secrets_duplication[secret_key] = True
                 bc_check_id = metadata_integration.get_bc_id(check_id)
+                if bc_check_id in secret_suppressions_id:
+                    logging.debug(f'Secret was filtered - check {check_id} was suppressed')
+                    continue
                 severity = metadata_integration.get_severity(check_id)
                 if not runner_filter.should_run_check(check_id=check_id, bc_check_id=bc_check_id, severity=severity,
                                                       report_type=CheckType.SECRETS):

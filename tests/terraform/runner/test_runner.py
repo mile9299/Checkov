@@ -41,19 +41,25 @@ EXTERNAL_MODULES_DOWNLOAD_PATH = os.environ.get('EXTERNAL_MODULES_DIR', DEFAULT_
 
 
 @parameterized_class([
-    {"db_connector": NetworkxConnector, "use_new_tf_parser": "True"},
-    {"db_connector": NetworkxConnector, "use_new_tf_parser": "False"},
-    {"db_connector": IgraphConnector, "use_new_tf_parser": "True"},
-    {"db_connector": IgraphConnector, "use_new_tf_parser": "False"}
+    {"db_connector": NetworkxConnector, "use_new_tf_parser": "True", "tf_split_graph": "True", "graph": "NETWORKX"},
+    {"db_connector": NetworkxConnector, "use_new_tf_parser": "True", "tf_split_graph": "False", "graph": "NETWORKX"},
+    {"db_connector": NetworkxConnector, "use_new_tf_parser": "False", "tf_split_graph": "False", "graph": "NETWORKX"},
+    {"db_connector": IgraphConnector, "use_new_tf_parser": "True", "tf_split_graph": "True", "graph": "IGRAPH"},
+    {"db_connector": IgraphConnector, "use_new_tf_parser": "True", "tf_split_graph": "False", "graph": "IGRAPH"},
+    {"db_connector": IgraphConnector, "use_new_tf_parser": "False", "tf_split_graph": "False", "graph": "IGRAPH"}
 ])
 class TestRunnerValid(unittest.TestCase):
     def setUp(self) -> None:
         self.orig_checks = resource_registry.checks
         self.db_connector = self.db_connector
+        os.environ["CHECKOV_GRAPH_FRAMEWORK"] = self.graph
         os.environ["CHECKOV_NEW_TF_PARSER"] = self.use_new_tf_parser
+        os.environ["TF_SPLIT_GRAPH"] = self.tf_split_graph
 
     def tearDown(self):
+        del os.environ["CHECKOV_GRAPH_FRAMEWORK"]
         del os.environ["CHECKOV_NEW_TF_PARSER"]
+        del os.environ["TF_SPLIT_GRAPH"]
 
     def test_registry_has_type(self):
         self.assertEqual(resource_registry.report_type, CheckType.TERRAFORM)
@@ -126,7 +132,7 @@ class TestRunnerValid(unittest.TestCase):
         self.assertEqual(report.get_exit_code({'soft_fail': False, 'soft_fail_checks': [], 'soft_fail_threshold': None, 'hard_fail_checks': [], 'hard_fail_threshold': None}), 1)
         summary = report.get_summary()
         self.assertGreaterEqual(summary['passed'], 1)
-        self.assertEqual(8, summary['failed'])
+        self.assertEqual(9, summary['failed'])
         self.assertEqual(1, summary['skipped'])
         self.assertEqual(0, summary["parsing_errors"])
 
@@ -235,7 +241,11 @@ class TestRunnerValid(unittest.TestCase):
         runner = Runner(db_connector=self.db_connector())
 
         # when
-        report = runner.run(root_folder=str(tf_dir_path), external_checks_dir=[str(extra_checks_dir_path)])
+        report = runner.run(
+            root_folder=str(tf_dir_path),
+            external_checks_dir=[str(extra_checks_dir_path)],
+            runner_filter=RunnerFilter(checks=["CUSTOM_GRAPH_AWS_2"])
+        )
 
         # then
         summary = report.get_summary()
@@ -271,7 +281,7 @@ class TestRunnerValid(unittest.TestCase):
         # self.assertEqual(report.get_exit_code(), 0)
         summary = report.get_summary()
         self.assertGreaterEqual(summary['passed'], 1)
-        self.assertEqual(4, summary['failed'])
+        self.assertEqual(5, summary['failed'])
         self.assertEqual(0, summary["parsing_errors"])
 
     def test_check_ids_dont_collide(self):
@@ -337,6 +347,9 @@ class TestRunnerValid(unittest.TestCase):
         for i in range(1, len(gcp_checks) + 2):
             if f'CKV_GCP_{i}' == 'CKV_GCP_5':
                 # CKV_GCP_5 is no longer a valid platform check
+                continue
+            if f'CKV_GCP_{i}' == 'CKV_GCP_67':
+                # CKV_GCP_67 is not deployable anymore https://cloud.google.com/kubernetes-engine/docs/how-to/hardening-your-cluster#protect_node_metadata
                 continue
 
             self.assertIn(f'CKV_GCP_{i}', gcp_checks, msg=f'The new GCP violation should have the ID "CKV_GCP_{i}"')
@@ -411,7 +424,10 @@ class TestRunnerValid(unittest.TestCase):
         for i in range(1, len(gcp_checks) + 1):
             self.assertIn(f'CKV2_GCP_{i}', gcp_checks,
                           msg=f'The new GCP violation should have the ID "CKV2_GCP_{i}"')
-        for i in range(1, len(azure_checks) + 1):
+        for i in range(1, len(azure_checks) + 2):
+            if f'CKV2_AZURE_{i}' == 'CKV2_AZURE_18':
+                # duplicate of CKV2_AZURE_1
+                continue
             self.assertIn(f'CKV2_AZURE_{i}', azure_checks,
                           msg=f'The new Azure violation should have the ID "CKV2_AZURE_{i}"')
 
@@ -428,6 +444,40 @@ class TestRunnerValid(unittest.TestCase):
         provider = next(check for check in result.passed_checks if check.resource == "aws.one-line")
         self.assertIsNotNone(provider.file_line_range)
 
+    def test_entire_resources_folder(self):
+        current_dir = os.path.dirname(os.path.realpath(__file__))
+        valid_dir_path = current_dir + "/resources/"
+        runner = Runner(db_connector=self.db_connector())
+        if isinstance(runner.db_connector, IgraphConnector):
+            result = runner.run(root_folder=valid_dir_path, external_checks_dir=None, runner_filter=RunnerFilter(
+                checks=['CKV_AWS_21', 'CKV_AWS_42', 'CKV_AWS_62', 'CKV_AWS_53', 'CKV_AWS_18', 'CKV_AWS_61', 'CKV_AWS_144',
+                        'CKV_AWS_145', 'CKV_AWS_115', 'CKV_AWS_116', 'CKV_AWS_117', 'CKV_AWS_6', 'CKV_AWS_168', 'CKV_AWS_170',
+                        'CKV_AWS_171', 'CKV_AWS_172', 'CKV_AWS_37', 'CKV_AWS_38', 'CKV_AWS_39', 'CKV_AWS_107', 'CKV_AWS_109',
+                        'CKV_AWS_110'], framework=['terraform']))
+            self.assertEqual(len(result.passed_checks), 52)
+            self.assertEqual(len(result.failed_checks), 255)
+            self.assertEqual(len(result.skipped_checks), 0)
+
+    def test_modules_folder_with_files_args(self):
+        current_dir = os.path.dirname(os.path.realpath(__file__))
+        valid_dir_path = current_dir + "/resources"
+        runner = Runner(db_connector=self.db_connector())
+        if isinstance(runner.db_connector, IgraphConnector):
+            res = []
+            for (dir_path, dir_names, file_names) in os.walk(valid_dir_path):
+                for file in file_names:
+                    res.append(os.path.join(dir_path, file))
+            result = runner.run(files=res, root_folder=None, external_checks_dir=None,
+                                runner_filter=RunnerFilter(
+                                    checks=['CKV_AWS_21', 'CKV_AWS_42', 'CKV_AWS_62', 'CKV_AWS_109', 'CKV_AWS_168',
+                                            'CKV_AWS_53', 'CKV_AWS_18', 'CKV_AWS_61', 'CKV_AWS_144', 'CKV_AWS_170',
+                                            'CKV_AWS_145', 'CKV_AWS_115', 'CKV_AWS_116', 'CKV_AWS_117', 'CKV_AWS_6',
+                                            'CKV_AWS_171', 'CKV_AWS_172', 'CKV_AWS_37', 'CKV_AWS_38', 'CKV_AWS_39',
+                                            'CKV_AWS_107', 'CKV_AWS_110'],
+                                    framework=['terraform']))
+            self.assertEqual(len(result.passed_checks), 51)
+            self.assertEqual(len(result.failed_checks), 263)
+            self.assertEqual(len(result.skipped_checks), 0)
 
     def test_terraform_module_checks_are_performed(self):
         check_name = "TF_M_1"
@@ -497,6 +547,7 @@ class TestRunnerValid(unittest.TestCase):
         self.assertIn('some-module', map(lambda record: record.resource, result.passed_checks))
 
     @mock.patch.dict(os.environ, {"CHECKOV_NEW_TF_PARSER": "False"})
+    @mock.patch.dict(os.environ, {"TF_SPLIT_GRAPH": "False"})
     @mock.patch.dict(os.environ, {"CHECKOV_ENABLE_FOREACH_HANDLING": "False"})
     def test_terraform_multiple_module_versions(self):
         # given
@@ -1290,13 +1341,13 @@ class TestRunnerValid(unittest.TestCase):
         runner = Runner(db_connector=self.db_connector())
         runner.context = {'/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf': {'module': {'module': {'vpc': {'start_line': 1, 'end_line': 7, 'code_lines': [(1, 'module "vpc" {\n'), (2, '  source       = "../../"\n'), (3, '  cidr         = var.cidr\n'), (4, '  zone         = var.zone\n'), (5, '  common_tags  = var.common_tags\n'), (6, '  account_name = var.account_name\n'), (7, '}\n')], 'skipped_checks': []}}}}, '/mock/os/terraform-aws-vpc/example/examplea/provider.aws.tf': {'provider': {'aws': {'default': {'start_line': 1, 'end_line': 3, 'code_lines': [(1, 'provider "aws" {\n'), (2, '  region = "eu-west-2"\n'), (3, '}\n')], 'skipped_checks': []}}}}, '/mock/os/terraform-aws-vpc/example/examplea/variables.tf': {'variable': {'cidr': {'start_line': 1, 'end_line': 3, 'code_lines': [(1, 'variable "cidr" {\n'), (2, '  type = string\n'), (3, '}\n')], 'skipped_checks': []}, 'zone': {'start_line': 5, 'end_line': 7, 'code_lines': [(5, 'variable "zone" {\n'), (6, '  type = list(any)\n'), (7, '}\n')], 'skipped_checks': []}, 'account_name': {'start_line': 9, 'end_line': 11, 'code_lines': [(9, 'variable "account_name" {\n'), (10, '  type = string\n'), (11, '}\n')], 'skipped_checks': []}, 'common_tags': {'start_line': 13, 'end_line': 15, 'code_lines': [(13, 'variable "common_tags" {\n'), (14, '  type = map(any)\n'), (15, '}\n')], 'skipped_checks': []}}}, f'/mock/os/terraform-aws-vpc/aws_eip.nateip.tf{TERRAFORM_NESTED_MODULE_PATH_PREFIX}/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf{TERRAFORM_NESTED_MODULE_INDEX_SEPARATOR}0{TERRAFORM_NESTED_MODULE_PATH_ENDING}': {'resource': {'aws_eip': {'nateip': {'start_line': 1, 'end_line': 4, 'code_lines': [(1, 'resource "aws_eip" "nateip" {\n'), (2, '  count = var.subnets\n'), (3, '  tags  = var.common_tags\n'), (4, '}\n')], 'skipped_checks': []}}}}, f'/mock/os/terraform-aws-vpc/aws_internet_gateway.gw.tf{TERRAFORM_NESTED_MODULE_PATH_PREFIX}/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf{TERRAFORM_NESTED_MODULE_INDEX_SEPARATOR}0{TERRAFORM_NESTED_MODULE_PATH_ENDING}': {'resource': {'aws_internet_gateway': {'gw': {'start_line': 1, 'end_line': 6, 'code_lines': [(1, 'resource "aws_internet_gateway" "gw" {\n'), (2, '  vpc_id = aws_vpc.main.id\n'), (3, '\n'), (4, '  tags = merge(var.common_tags,\n'), (5, '  tomap({ "Name" = "${upper(var.account_name)}-IGW" }))\n'), (6, '}\n')], 'skipped_checks': []}}}}, f'/mock/os/terraform-aws-vpc/aws_nat_gateway.natgateway.tf{TERRAFORM_NESTED_MODULE_PATH_PREFIX}/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf{TERRAFORM_NESTED_MODULE_INDEX_SEPARATOR}0{TERRAFORM_NESTED_MODULE_PATH_ENDING}': {'resource': {'aws_nat_gateway': {'natgateway': {'start_line': 1, 'end_line': 8, 'code_lines': [(1, 'resource "aws_nat_gateway" "natgateway" {\n'), (2, '  count         = var.subnets\n'), (3, '  allocation_id = element(aws_eip.nateip.*.id, count.index)\n'), (4, '  depends_on    = [aws_internet_gateway.gw]\n'), (5, '  subnet_id     = element(aws_subnet.public.*.id, count.index)\n'), (6, '  tags = merge(var.common_tags,\n'), (7, '  tomap({ "Name" = "${upper(var.account_name)}-AZ${count.index + 1}" }))\n'), (8, '}\n')], 'skipped_checks': []}}}}, f'/mock/os/terraform-aws-vpc/aws_network_acl.NetworkAclPrivate.tf{TERRAFORM_NESTED_MODULE_PATH_PREFIX}/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf{TERRAFORM_NESTED_MODULE_INDEX_SEPARATOR}0{TERRAFORM_NESTED_MODULE_PATH_ENDING}': {'resource': {'aws_network_acl': {'networkaclprivate': {'start_line': 1, 'end_line': 25, 'code_lines': [(1, 'resource "aws_network_acl" "networkaclprivate" {\n'), (2, '  vpc_id     = aws_vpc.main.id\n'), (3, '  subnet_ids = aws_subnet.private.*.id\n'), (4, '\n'), (5, '  egress {\n'), (6, '    rule_no    = 100\n'), (7, '    action     = "allow"\n'), (8, '    cidr_block = "0.0.0.0/0"\n'), (9, '    from_port  = 0\n'), (10, '    to_port    = 0\n'), (11, '    protocol   = "all"\n'), (12, '  }\n'), (13, '\n'), (14, '  ingress {\n'), (15, '    rule_no    = 100\n'), (16, '    action     = "allow"\n'), (17, '    cidr_block = "0.0.0.0/0"\n'), (18, '    from_port  = 0\n'), (19, '    to_port    = 0\n'), (20, '    protocol   = "all"\n'), (21, '  }\n'), (22, '\n'), (23, '  tags = merge(var.common_tags,\n'), (24, '  tomap({ "Name" = "${var.account_name}-NetworkAcl-Private" }))\n'), (25, '}\n')], 'skipped_checks': []}}}}, f'/mock/os/terraform-aws-vpc/aws_network_acl.NetworkAclPublic.tf{TERRAFORM_NESTED_MODULE_PATH_PREFIX}/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf{TERRAFORM_NESTED_MODULE_INDEX_SEPARATOR}0{TERRAFORM_NESTED_MODULE_PATH_ENDING}': {'resource': {'aws_network_acl': {'networkaclpublic': {'start_line': 1, 'end_line': 25, 'code_lines': [(1, 'resource "aws_network_acl" "networkaclpublic" {\n'), (2, '  vpc_id     = aws_vpc.main.id\n'), (3, '  subnet_ids = aws_subnet.public.*.id\n'), (4, '\n'), (5, '  egress {\n'), (6, '    rule_no    = 100\n'), (7, '    action     = "allow"\n'), (8, '    cidr_block = "0.0.0.0/0"\n'), (9, '    from_port  = 0\n'), (10, '    to_port    = 0\n'), (11, '    protocol   = "all"\n'), (12, '  }\n'), (13, '\n'), (14, '  ingress {\n'), (15, '    rule_no    = 100\n'), (16, '    action     = "allow"\n'), (17, '    cidr_block = "0.0.0.0/0"\n'), (18, '    from_port  = 0\n'), (19, '    to_port    = 0\n'), (20, '    protocol   = "all"\n'), (21, '  }\n'), (22, '\n'), (23, '  tags = merge(var.common_tags,\n'), (24, '  tomap({ "Name" = "${var.account_name}-NetworkAcl-Public" }))\n'), (25, '}\n')], 'skipped_checks': []}}}}, f'/mock/os/terraform-aws-vpc/aws_route_table.private.tf{TERRAFORM_NESTED_MODULE_PATH_PREFIX}/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf{TERRAFORM_NESTED_MODULE_INDEX_SEPARATOR}0{TERRAFORM_NESTED_MODULE_PATH_ENDING}': {'resource': {'aws_route_table': {'private': {'start_line': 1, 'end_line': 8, 'code_lines': [(1, 'resource "aws_route_table" "private" {\n'), (2, '  vpc_id = aws_vpc.main.id\n'), (3, '\n'), (4, '  propagating_vgws = [aws_vpn_gateway.vpn_gw.id]\n'), (5, '\n'), (6, '  tags = merge(var.common_tags,\n'), (7, '  tomap({ "Name" = "${var.account_name}-Private-${element(aws_subnet.private.*.id, 0)}" }))\n'), (8, '}\n')], 'skipped_checks': []}}, 'aws_route': {'private': {'start_line': 10, 'end_line': 14, 'code_lines': [(10, 'resource "aws_route" "private" {\n'), (11, '  route_table_id         = aws_route_table.private.id\n'), (12, '  destination_cidr_block = "0.0.0.0/0"\n'), (13, '  nat_gateway_id         = element(aws_nat_gateway.natgateway.*.id, 0)\n'), (14, '}\n')], 'skipped_checks': []}}}}, f'/mock/os/terraform-aws-vpc/aws_route_table.public.tf{TERRAFORM_NESTED_MODULE_PATH_PREFIX}/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf{TERRAFORM_NESTED_MODULE_INDEX_SEPARATOR}0{TERRAFORM_NESTED_MODULE_PATH_ENDING}': {'resource': {'aws_route_table': {'public': {'start_line': 1, 'end_line': 6, 'code_lines': [(1, 'resource "aws_route_table" "public" {\n'), (2, '  vpc_id = aws_vpc.main.id\n'), (3, '\n'), (4, '  tags = merge(var.common_tags,\n'), (5, '  tomap({ "Name" = "${upper(var.account_name)}-Public" }))\n'), (6, '}\n')], 'skipped_checks': []}}, 'aws_route': {'public': {'start_line': 8, 'end_line': 12, 'code_lines': [(8, 'resource "aws_route" "public" {\n'), (9, '  route_table_id         = aws_route_table.public.id\n'), (10, '  destination_cidr_block = "0.0.0.0/0"\n'), (11, '  gateway_id             = aws_internet_gateway.gw.id\n'), (12, '}\n')], 'skipped_checks': []}}}}, f'/mock/os/terraform-aws-vpc/aws_route_table_association.private.tf{TERRAFORM_NESTED_MODULE_PATH_PREFIX}/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf{TERRAFORM_NESTED_MODULE_INDEX_SEPARATOR}0{TERRAFORM_NESTED_MODULE_PATH_ENDING}': {'resource': {'aws_route_table_association': {'private': {'start_line': 1, 'end_line': 5, 'code_lines': [(1, 'resource "aws_route_table_association" "private" {\n'), (2, '  count          = var.subnets\n'), (3, '  subnet_id      = element(aws_subnet.private.*.id, count.index)\n'), (4, '  route_table_id = aws_route_table.private.id\n'), (5, '}\n')], 'skipped_checks': []}}}}, f'/mock/os/terraform-aws-vpc/aws_route_table_association.public.tf{TERRAFORM_NESTED_MODULE_PATH_PREFIX}/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf{TERRAFORM_NESTED_MODULE_INDEX_SEPARATOR}0{TERRAFORM_NESTED_MODULE_PATH_ENDING}': {'resource': {'aws_route_table_association': {'public': {'start_line': 1, 'end_line': 5, 'code_lines': [(1, 'resource "aws_route_table_association" "public" {\n'), (2, '  count          = var.subnets\n'), (3, '  subnet_id      = element(aws_subnet.public.*.id, count.index)\n'), (4, '  route_table_id = aws_route_table.public.id\n'), (5, '}\n')], 'skipped_checks': []}}}}, f'/mock/os/terraform-aws-vpc/aws_subnet.private.tf{TERRAFORM_NESTED_MODULE_PATH_PREFIX}/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf{TERRAFORM_NESTED_MODULE_INDEX_SEPARATOR}0{TERRAFORM_NESTED_MODULE_PATH_ENDING}': {'resource': {'aws_subnet': {'private': {'start_line': 1, 'end_line': 10, 'code_lines': [(1, 'resource "aws_subnet" "private" {\n'), (2, '  count             = var.subnets\n'), (3, '  vpc_id            = aws_vpc.main.id\n'), (4, '  cidr_block        = local.private_cidrs[count.index]\n'), (5, '  availability_zone = data.aws_availability_zones.available.names[count.index]\n'), (6, '\n'), (7, '  tags = merge(var.common_tags,\n'), (8, '    tomap({ "Type" = "Private" }),\n'), (9, '  tomap({ "Name" = "${upper(var.account_name)}-Private-${var.zone[count.index]}" }))\n'), (10, '}\n')], 'skipped_checks': []}}}}, f'/mock/os/terraform-aws-vpc/aws_subnet.public.tf{TERRAFORM_NESTED_MODULE_PATH_PREFIX}/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf{TERRAFORM_NESTED_MODULE_INDEX_SEPARATOR}0{TERRAFORM_NESTED_MODULE_PATH_ENDING}': {'resource': {'aws_subnet': {'public': {'start_line': 1, 'end_line': 10, 'code_lines': [(1, 'resource "aws_subnet" "public" {\n'), (2, '  count             = var.subnets\n'), (3, '  vpc_id            = aws_vpc.main.id\n'), (4, '  cidr_block        = local.public_cidrs[count.index]\n'), (5, '  availability_zone = data.aws_availability_zones.available.names[count.index]\n'), (6, '\n'), (7, '  tags = merge(var.common_tags,\n'), (8, '    tomap({ "Type" = "Public" }),\n'), (9, '  tomap({ "Name" = "${upper(var.account_name)}-Public-${var.zone[count.index]}" }))\n'), (10, '}\n')], 'skipped_checks': []}}}}, f'/mock/os/terraform-aws-vpc/aws_vpc.main.tf{TERRAFORM_NESTED_MODULE_PATH_PREFIX}/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf{TERRAFORM_NESTED_MODULE_INDEX_SEPARATOR}0{TERRAFORM_NESTED_MODULE_PATH_ENDING}': {'locals': {'start_line': 10, 'end_line': 12, 'code_lines': [(10, 'locals {\n'), (11, '  tags = merge(var.common_tags, tomap({ "Name" = upper(var.account_name) }))\n'), (12, '}\n')], 'assignments': {'tags': "merge([],tomap({'Name':'upper(test)'}))"}, 'skipped_checks': []}, 'resource': {'aws_vpc': {'main': {'start_line': 1, 'end_line': 7, 'code_lines': [(1, 'resource "aws_vpc" "main" {\n'), (2, '  cidr_block           = var.cidr\n'), (3, '  enable_dns_support   = true\n'), (4, '  enable_dns_hostnames = true\n'), (5, '\n'), (6, '  tags = local.tags\n'), (7, '}\n')], 'skipped_checks': []}}}}, f'/mock/os/terraform-aws-vpc/aws_vpn_gateway.vpn_gw.tf{TERRAFORM_NESTED_MODULE_PATH_PREFIX}/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf{TERRAFORM_NESTED_MODULE_INDEX_SEPARATOR}0{TERRAFORM_NESTED_MODULE_PATH_ENDING}': {'resource': {'aws_vpn_gateway': {'vpn_gw': {'start_line': 1, 'end_line': 6, 'code_lines': [(1, 'resource "aws_vpn_gateway" "vpn_gw" {\n'), (2, '  vpc_id = aws_vpc.main.id\n'), (3, '\n'), (4, '  tags = merge(var.common_tags,\n'), (5, '  tomap({ "Name" = "${upper(var.account_name)}-VGW" }))\n'), (6, '}\n')], 'skipped_checks': []}}}}, f'/mock/os/terraform-aws-vpc/data.aws_availability_zones.tf{TERRAFORM_NESTED_MODULE_PATH_PREFIX}/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf{TERRAFORM_NESTED_MODULE_INDEX_SEPARATOR}0{TERRAFORM_NESTED_MODULE_PATH_ENDING}': {'data': {'aws_availability_zones': {'available': {'start_line': 1, 'end_line': 0, 'code_lines': [], 'skipped_checks': []}}}}, f'/mock/os/terraform-aws-vpc/variables.tf{TERRAFORM_NESTED_MODULE_PATH_PREFIX}/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf{TERRAFORM_NESTED_MODULE_INDEX_SEPARATOR}0{TERRAFORM_NESTED_MODULE_PATH_ENDING}': {'locals': {'start_line': 27, 'end_line': 30, 'code_lines': [(27, 'locals {\n'), (28, '  public_cidrs  = [cidrsubnet(var.cidr, 3, 0), cidrsubnet(var.cidr, 3, 1), cidrsubnet(var.cidr, 3, 2)]\n'), (29, '  private_cidrs = [cidrsubnet(var.cidr, 3, 3), cidrsubnet(var.cidr, 3, 4), cidrsubnet(var.cidr, 3, 5)]\n'), (30, '}\n')], 'skipped_checks': []}, 'variable': {'account_name': {'start_line': 1, 'end_line': 4, 'code_lines': [(1, 'variable "account_name" {\n'), (2, '  type        = string\n'), (3, '  description = "The Name of the Account"\n'), (4, '}\n')], 'skipped_checks': []}, 'cidr': {'start_line': 6, 'end_line': 9, 'code_lines': [(6, 'variable "cidr" {\n'), (7, '  type        = string\n'), (8, '  description = "The range to be associated with the VPC and cleaved into the subnets"\n'), (9, '}\n')], 'skipped_checks': []}, 'common_tags': {'start_line': 11, 'end_line': 14, 'code_lines': [(11, 'variable "common_tags" {\n'), (12, '  type        = map(any)\n'), (13, '  description = "A tagging scheme"\n'), (14, '}\n')], 'skipped_checks': []}, 'zone': {'start_line': 16, 'end_line': 19, 'code_lines': [(16, 'variable "zone" {\n'), (17, '  type        = list(any)\n'), (18, '  description = "Availability zone names"\n'), (19, '}\n')], 'skipped_checks': []}, 'subnets': {'start_line': 21, 'end_line': 25, 'code_lines': [(21, 'variable "subnets" {\n'), (22, '  type        = number\n'), (23, '  default     = 3\n'), (24, '  description = "The number of subnets required, less than or equal to the number of availability zones"\n'), (25, '}\n')], 'skipped_checks': []}, 'assignments': {'subnets': 3}}}}
         entity_with_non_found_path = {'block_name_': 'aws_vpc.main', 'block_type_': 'resource', 'file_path_': '/mock/os/terraform-aws-vpc/aws_vpc.main.tf', 'config_': {'aws_vpc': {'main': {'cidr_block': ['10.0.0.0/21'], 'enable_dns_hostnames': [True], 'enable_dns_support': [True], 'tags': ["merge([],tomap({'Name':'upper(test)'}))"]}}}, 'label_': 'BlockType.RESOURCE: aws_vpc.main', 'id_': 'aws_vpc.main', 'source_': 'Terraform', 'cidr_block': '10.0.0.0/21', 'enable_dns_hostnames': True, 'enable_dns_support': True, 'tags': "merge([],tomap({'Name':'upper(test)'}))", 'resource_type': 'aws_vpc', 'rendering_breadcrumbs_': {'cidr_block': [{'type': 'module', 'name': 'vpc', 'path': '/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf', 'module_connection': False}, {'type': 'variable', 'name': 'cidr', 'path': '/mock/os/terraform-aws-vpc/variables.tf', 'module_connection': False}, {'type': 'locals', 'name': 'private_cidrs', 'path': '/mock/os/terraform-aws-vpc/variables.tf', 'module_connection': False}, {'type': 'locals', 'name': 'public_cidrs', 'path': '/mock/os/terraform-aws-vpc/variables.tf', 'module_connection': False}, {'type': 'locals', 'name': 'private_cidrs', 'path': '/mock/os/terraform-aws-vpc/variables.tf', 'module_connection': False}, {'type': 'locals', 'name': 'public_cidrs', 'path': '/mock/os/terraform-aws-vpc/variables.tf', 'module_connection': False}, {'type': 'output', 'name': 'private_cidrs', 'path': '/mock/os/terraform-aws-vpc/outputs.tf', 'module_connection': False}], 'source_module_': [{'type': 'module', 'name': 'vpc', 'path': '/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf'}], 'tags': [{'type': 'module', 'name': 'vpc', 'path': '/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf', 'module_connection': False}, {'type': 'variable', 'name': 'account_name', 'path': '/mock/os/terraform-aws-vpc/variables.tf', 'module_connection': False}, {'type': 'locals', 'name': 'tags', 'path': '/mock/os/terraform-aws-vpc/aws_vpc.main.tf', 'module_connection': False}]}, 'hash': 'bac3bb7d21610be9ad786c1e9b5a2b3f6f13e60699fa935b32bb1f9f10a792e4', 'module_dependency_': '/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf', 'module_dependency_num_': '0'}
-        entity_context, entity_evaluations = runner.get_entity_context_and_evaluations(entity_with_non_found_path)
+        entity_context = runner.get_entity_context_and_evaluations(entity_with_non_found_path)
 
         assert entity_context is not None
         assert entity_context['start_line'] == 1 and entity_context['end_line'] == 7
 
         entity_with_found_path = {'block_name_': 'aws_vpc.main', 'block_type_': 'resource', 'file_path_': f'/mock/os/terraform-aws-vpc/aws_vpc.main.tf{TERRAFORM_NESTED_MODULE_PATH_PREFIX}/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf{TERRAFORM_NESTED_MODULE_INDEX_SEPARATOR}0{TERRAFORM_NESTED_MODULE_PATH_ENDING}', 'config_': {'aws_vpc': {'main': {'cidr_block': ['10.0.0.0/21'], 'enable_dns_hostnames': [True], 'enable_dns_support': [True], 'tags': ["merge([],tomap({'Name':'upper(test)'}))"]}}}, 'label_': 'BlockType.RESOURCE: aws_vpc.main', 'id_': 'aws_vpc.main', 'source_': 'Terraform', 'cidr_block': '10.0.0.0/21', 'enable_dns_hostnames': True, 'enable_dns_support': True, 'tags': "merge([],tomap({'Name':'upper(test)'}))", 'resource_type': 'aws_vpc', 'rendering_breadcrumbs_': {'cidr_block': [{'type': 'module', 'name': 'vpc', 'path': '/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf', 'module_connection': False}, {'type': 'variable', 'name': 'cidr', 'path': '/mock/os/terraform-aws-vpc/variables.tf', 'module_connection': False}, {'type': 'locals', 'name': 'private_cidrs', 'path': '/mock/os/terraform-aws-vpc/variables.tf', 'module_connection': False}, {'type': 'locals', 'name': 'public_cidrs', 'path': '/mock/os/terraform-aws-vpc/variables.tf', 'module_connection': False}, {'type': 'locals', 'name': 'private_cidrs', 'path': '/mock/os/terraform-aws-vpc/variables.tf', 'module_connection': False}, {'type': 'locals', 'name': 'public_cidrs', 'path': '/mock/os/terraform-aws-vpc/variables.tf', 'module_connection': False}, {'type': 'output', 'name': 'private_cidrs', 'path': '/mock/os/terraform-aws-vpc/outputs.tf', 'module_connection': False}], 'source_module_': [{'type': 'module', 'name': 'vpc', 'path': '/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf'}], 'tags': [{'type': 'module', 'name': 'vpc', 'path': '/mock/os/terraform-aws-vpc/example/examplea/module.vpc.tf', 'module_connection': False}, {'type': 'variable', 'name': 'account_name', 'path': '/mock/os/terraform-aws-vpc/variables.tf', 'module_connection': False}, {'type': 'locals', 'name': 'tags', 'path': '/mock/os/terraform-aws-vpc/aws_vpc.main.tf', 'module_connection': False}]}, 'hash': 'bac3bb7d21610be9ad786c1e9b5a2b3f6f13e60699fa935b32bb1f9f10a792e4'}
-        entity_context, entity_evaluations = runner.get_entity_context_and_evaluations(entity_with_found_path)
+        entity_context = runner.get_entity_context_and_evaluations(entity_with_found_path)
 
         assert entity_context is not None
         assert entity_context['start_line'] == 1 and entity_context['end_line'] == 7

@@ -5,6 +5,7 @@ import os
 import hashlib
 from typing import Optional, List, TYPE_CHECKING, Set, Dict
 
+from checkov.common.resource_code_logger_filter import add_resource_code_filter_to_logger
 from checkov.common.util.consts import DEFAULT_EXTERNAL_MODULES_DIR
 from checkov.terraform.module_loading.content import ModuleContent
 from checkov.terraform.module_loading.module_params import ModuleParams
@@ -21,16 +22,20 @@ class ModuleLoaderRegistry:
         self, download_external_modules: bool = False, external_modules_folder_name: str = DEFAULT_EXTERNAL_MODULES_DIR
     ) -> None:
         self.logger = logging.getLogger(__name__)
+        add_resource_code_filter_to_logger(self.logger)
         self.download_external_modules = download_external_modules
         self.external_modules_folder_name = external_modules_folder_name
         self.failed_urls_cache: Set[str] = set()
         self.root_dir = ""  # root dir for storing external modules
 
-    def load(self, current_dir: str, source: str, source_version: Optional[str]) -> ModuleContent:
+    def load(self, current_dir: str, source: str | None, source_version: Optional[str]) -> ModuleContent | None:
         """
 Search all registered loaders for the first one which is able to load the module source type. For more
 information, see `loader.ModuleLoader.load`.
         """
+        if source is None:
+            return None
+
         module_address = f'{source}:{source_version}'
         if module_address in self.module_content_cache:
             logging.debug(f'Used the cache for module {module_address}')

@@ -3,9 +3,9 @@ from __future__ import annotations
 import logging
 import os
 from collections import defaultdict
-from copy import deepcopy
+from functools import partial
 from pathlib import Path
-from typing import List, Optional, Union, Any, Dict, Set, Tuple
+from typing import List, Optional, Union, Any, Dict, Set, Tuple, overload, TYPE_CHECKING
 
 from typing_extensions import TypedDict
 
@@ -16,6 +16,7 @@ from checkov.common.graph.graph_builder.graph_components.attribute_names import 
 from checkov.common.graph.graph_builder.local_graph import LocalGraph
 from checkov.common.graph.graph_builder.utils import calculate_hash, join_trimmed_strings, filter_sub_keys
 from checkov.common.runners.base_runner import strtobool
+from checkov.common.util.data_structures_utils import pickle_deepcopy
 from checkov.common.util.parser_utils import get_abs_path, get_tf_definition_key_from_module_dependency
 from checkov.common.util.type_forcers import force_int
 from checkov.terraform.graph_builder.foreach.builder import ForeachBuilder
@@ -35,6 +36,8 @@ from checkov.terraform.graph_builder.utils import (
 from checkov.terraform.graph_builder.utils import is_local_path
 from checkov.terraform.graph_builder.variable_rendering.renderer import TerraformVariableRenderer
 
+if TYPE_CHECKING:
+    from checkov.common.typing import TFDefinitionKeyType
 
 MODULE_RESERVED_ATTRIBUTES = ("source", "version")
 CROSS_VARIABLE_EDGE_PREFIX = '[cross-variable] '
@@ -55,8 +58,8 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
         self.relative_paths_cache: dict[tuple[str, str], str] = {}
         self.abspath_cache: Dict[str, str] = {}
         self.dirname_cache: Dict[str, str] = {}
-        self.vertices_by_module_dependency_by_name: Dict[Tuple[str, str], Dict[BlockType, Dict[str, List[int]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
-        self.vertices_by_module_dependency: Dict[Tuple[str, str], Dict[BlockType, List[int]]] = defaultdict(lambda: defaultdict(list))
+        self.vertices_by_module_dependency_by_name: Dict[TFModule | None, Dict[str, Dict[str, List[int]]]] = defaultdict(partial(defaultdict, partial(defaultdict, list)))  # type:ignore[arg-type]
+        self.vertices_by_module_dependency: Dict[TFModule | None, Dict[str, List[int]]] = defaultdict(partial(defaultdict, list))  # type:ignore[arg-type]
         self.enable_foreach_handling = strtobool(os.getenv('CHECKOV_ENABLE_FOREACH_HANDLING', 'True'))
         self.enable_modules_foreach_handling = strtobool(os.getenv('CHECKOV_ENABLE_MODULES_FOREACH_HANDLING', 'True'))
         self.use_new_tf_parser = strtobool(os.getenv('CHECKOV_NEW_TF_PARSER', 'True'))
@@ -77,7 +80,7 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
                 self._build_edges()
                 logging.info(f"[TerraformLocalGraph] finished handling foreach values with {len(self.vertices)} vertices and {len(self.edges)} edges")
             except Exception as e:
-                logging.info(f'Failed to process foreach handling, error: {str(e)}', exc_info=True)
+                logging.info(f'Failed to process foreach handling, error: {str(e)}')
 
         self.calculate_encryption_attribute(ENCRYPTION_BY_RESOURCE_TYPE)
         if render_variables:
@@ -95,7 +98,7 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
 
     def _create_vertices(self) -> None:
         logging.info("Creating vertices")
-        self.vertices: List[TerraformBlock] = [None] * len(self.module.blocks)
+        self.vertices = [None] * len(self.module.blocks)  # type:ignore[list-item]  # are correctly set in the next lines
         for i, block in enumerate(self.module.blocks):
             self.vertices[i] = block
             self._add_block_data_to_graph(i, block)
@@ -116,8 +119,9 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
             self.vertices_by_module_dependency[block.source_module_object][block.block_type].append(idx)
             self.vertices_by_module_dependency_by_name[block.source_module_object][block.block_type][block.name].append(idx)
         else:
-            self.vertices_by_module_dependency[(block.module_dependency, block.module_dependency_num)][block.block_type].append(idx)
-            self.vertices_by_module_dependency_by_name[(block.module_dependency, block.module_dependency_num)][block.block_type][block.name].append(idx)
+            # mypy: fixed, when the old parser is removed
+            self.vertices_by_module_dependency[(block.module_dependency, block.module_dependency_num)][block.block_type].append(idx)  # type:ignore[index]
+            self.vertices_by_module_dependency_by_name[(block.module_dependency, block.module_dependency_num)][block.block_type][block.name].append(idx)  # type:ignore[index]
 
         self.in_edges[idx] = []
         self.out_edges[idx] = []
@@ -125,10 +129,10 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
     def _arrange_graph_data(self) -> None:
         # reset all the relevant data
         self.vertices_by_block_type = defaultdict(list)
-        self.vertices_block_name_map = defaultdict(lambda: defaultdict(list))
+        self.vertices_block_name_map = defaultdict(partial(defaultdict, list))  # type:ignore[arg-type]
         self.map_path_to_module = {}
-        self.vertices_by_module_dependency = defaultdict(lambda: defaultdict(list))
-        self.vertices_by_module_dependency_by_name = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+        self.vertices_by_module_dependency = defaultdict(partial(defaultdict, list))  # type:ignore[arg-type]
+        self.vertices_by_module_dependency_by_name = defaultdict(partial(defaultdict, partial(defaultdict, list)))  # type:ignore[arg-type]
         self.edges = []
         for i in range(len(self.vertices)):
             self.out_edges[i] = []
@@ -137,7 +141,7 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
         for i, block in enumerate(self.vertices):
             self._add_block_data_to_graph(i, block)
 
-    def _get_aliases(self) -> Dict[str, Dict[str, BlockType]]:
+    def _get_aliases(self) -> Dict[str, Dict[str, str]]:
         """
         :return aliases: map between alias names that are found inside the blocks and the block type their aliased to.
         """
@@ -169,7 +173,11 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
                     break
             return
 
-        block_dirs_to_modules: Dict[Tuple[str, str], Dict[str, Set[int]]] = defaultdict(dict)
+        if not self.module.module_dependency_map:
+            # no need to proceed further
+            return
+
+        block_dirs_to_modules: Dict[Tuple[str, str | None], Dict[str, Set[int]]] = defaultdict(dict)
         for dir_name, paths_to_modules in self.module.module_dependency_map.items():
             # for each directory, find the module vertex that imported it
             for path_to_module in paths_to_modules:
@@ -198,9 +206,9 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
 
         for vertex in self.vertices:
             # match the right module vertex according to the vertex path directory
-            module_dependency_nums = block_dirs_to_modules.get((self.get_dirname(vertex.path), vertex.module_dependency))
+            module_dependency_nums = block_dirs_to_modules.get((self.get_dirname(vertex.path), vertex.module_dependency))  # type:ignore[arg-type]  # will be fixed when removing terraform/checks from mypy exclusion
             if module_dependency_nums:
-                module_indices = module_dependency_nums.get(vertex.module_dependency_num)
+                module_indices = module_dependency_nums.get(vertex.module_dependency_num)  # type:ignore[arg-type]  # vertex.module_dependency_num can be None, which is ok
                 if module_indices:
                     vertex.source_module = module_indices
 
@@ -212,9 +220,9 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
         for origin_node_index, vertex in enumerate(self.vertices):
             self._build_edges_for_vertex(origin_node_index, vertex, aliases, resources_types)
 
-    def _build_edges_for_vertex(self, origin_node_index: int, vertex: TerraformBlock, aliases: Dict[str, Dict[str, BlockType]],
+    def _build_edges_for_vertex(self, origin_node_index: int, vertex: TerraformBlock, aliases: Dict[str, Dict[str, str]],
                                 resources_types: List[str], cross_variable_edges: bool = False,
-                                referenced_modules: Optional[List[Dict[str, Any]]] = None):
+                                referenced_modules: Optional[List[Dict[str, Any]]] = None) -> None:
 
         attribute_is_leaf = get_attribute_is_leaf(vertex)
         for attribute_key, attribute_value in vertex.attributes.items():
@@ -243,12 +251,15 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
                             referenced_module_object = module.get("source_module_object")
                             if not self.use_new_tf_parser:
                                 source_module_object = referenced_module_object if source_module_object else None
-                            dest_node_index = self._find_vertex_index_relative_to_path(
-                                vertex_reference.block_type, reference_name, referenced_module_path,
-                                vertex.module_dependency,
-                                vertex.module_dependency_num, referenced_module_idx,
-                                source_module_object=source_module_object
-                            )
+                            if referenced_module_path is None:
+                                dest_node_index = -1
+                            else:
+                                dest_node_index = self._find_vertex_index_relative_to_path(
+                                    vertex_reference.block_type, reference_name, referenced_module_path,
+                                    vertex.module_dependency,
+                                    vertex.module_dependency_num, referenced_module_idx,
+                                    source_module_object=source_module_object
+                                )
                             self._create_edge_from_reference(attribute_key, origin_node_index, dest_node_index,
                                                              sub_values, vertex_reference, cross_variable_edges)
                     if vertex.module_dependency or hasattr(vertex, "source_module_object"):
@@ -272,7 +283,7 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
                         break
 
         if vertex.block_type == BlockType.MODULE and vertex.attributes.get('source') \
-                and isinstance(vertex.attributes.get('source')[0], str):
+                and isinstance(vertex.attributes['source'][0], str):
             dest_module_path = self._get_dest_module_path(
                 curr_module_dir=self.get_dirname(vertex.path),
                 dest_module_source=vertex.attributes["source"][0],
@@ -284,7 +295,7 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
                     continue
                 target_variable = next((v for v in target_variables if self.vertices[v].name == attribute), None)
                 if target_variable is not None:
-                    self._create_edge(target_variable, origin_node_index, "default", cross_variable_edges)
+                    self.create_edge(target_variable, origin_node_index, "default", cross_variable_edges)
         elif vertex.block_type == BlockType.TF_VARIABLE:
             # Assuming the tfvars file is in the same directory as the variables file (best practice)
             target_variable = 0
@@ -293,7 +304,7 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
                     target_variable = index
                     break
             if target_variable:
-                self._create_edge(target_variable, origin_node_index, "default", cross_variable_edges)
+                self.create_edge(target_variable, origin_node_index, "default", cross_variable_edges)
 
     def _create_edge_from_reference(self, attribute_key: Any, origin_node_index: int, dest_node_index: int,
                                     sub_values: List[Any], vertex_reference: TerraformVertexReference,
@@ -311,8 +322,8 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
                         f"Module {self.vertices[dest_node_index]} does not have source attribute, skipping"
                     )
             else:
-                self._create_edge(origin_node_index, dest_node_index, attribute_key,
-                                  cross_variable_edges)
+                self.create_edge(origin_node_index, dest_node_index, attribute_key,
+                                 cross_variable_edges)
 
     def _get_target_variables(self, vertex: TerraformBlock, dest_module_path: str) -> list[int]:
         if self.use_new_tf_parser:
@@ -323,16 +334,16 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
                 if self.get_dirname(self.vertices[index].path) == dest_module_path
             ]
         else:
-            target_path = get_path_with_nested_modules(vertex)
+            target_path_old = get_path_with_nested_modules(vertex)
             return [
                 index
-                for index in self.vertices_by_module_dependency.get(
-                    (target_path, self.module.module_address_map.get((vertex.path, vertex.name))), {}).get(
+                for index in self.vertices_by_module_dependency.get(  # type:ignore[call-overload]  # fixed, when the old parser is removed
+                    (target_path_old, self.module.module_address_map.get((vertex.path, vertex.name))), {}).get(
                     BlockType.VARIABLE, [])
                 if self.get_dirname(self.vertices[index].path) == dest_module_path
             ]
 
-    def _build_cross_variable_edges(self):
+    def _build_cross_variable_edges(self) -> None:
         aliases = self._get_aliases()
         resources_types = self.get_resources_types_in_graph()
         for origin_node_index, referenced_vertices in self.out_edges.items():
@@ -342,8 +353,8 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
                 modules = vertex.breadcrumbs.get(CustomAttributes.SOURCE_MODULE, [])
                 self._build_edges_for_vertex(origin_node_index, vertex, aliases, resources_types, True, modules)
 
-    def _create_edge(self, origin_vertex_index: int, dest_vertex_index: int, label: str,
-                     cross_variable_edges: bool = False) -> bool:
+    def create_edge(self, origin_vertex_index: int, dest_vertex_index: int, label: str,
+                    cross_variable_edges: bool = False) -> bool:
         if origin_vertex_index == dest_vertex_index:
             return False
         edge = Edge(origin_vertex_index, dest_vertex_index, label)
@@ -391,7 +402,7 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
             for vertex_index in output_blocks_with_name:
                 vertex = self.vertices[vertex_index]
                 if self._should_add_edge(vertex, dest_module_path, module_node):
-                    added_edge = self._create_edge(origin_node_index, vertex_index, attribute_key, cross_variable_edges)
+                    added_edge = self.create_edge(origin_node_index, vertex_index, attribute_key, cross_variable_edges)
                     if added_edge:
                         self.vertices[origin_node_index].add_module_connection(attribute_key, vertex_index)
                     break
@@ -415,9 +426,16 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
         return ""
 
     def _find_vertex_index_relative_to_path(
-        self, block_type: BlockType, name: str, block_path: str, module_path: str, module_num: str, relative_module_idx: Optional[int] = None, source_module_object: Optional[TFModule] = None
+        self,
+        block_type: str,
+        name: str,
+        block_path: str,
+        module_path: TFDefinitionKeyType | None,
+        module_num: str | None,
+        relative_module_idx: Optional[int] = None,
+        source_module_object: Optional[TFModule] = None,
     ) -> int:
-        relative_vertices = []
+        relative_vertices: list[int] = []
         if self.use_new_tf_parser:
             if relative_module_idx is None:
                 module_dependency_by_name_key = source_module_object
@@ -430,8 +448,10 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
             module_dependency_by_name_key = next(k for k, v in self.vertices_by_module_dependency.items() if
                                                  v.get(BlockType.MODULE, []).__contains__(relative_module_idx))
         else:
-            module_dependency_by_name_key = (module_path, module_num)
-        possible_vertices = self.vertices_by_module_dependency_by_name.get(module_dependency_by_name_key, {}).get(block_type, {}).get(name, [])  # important to use this specific map for big graph performance
+            module_dependency_by_name_key = (module_path, module_num)  # type:ignore[assignment]  # fixed, when the old parser is removed
+
+        # important to use this specific map for big graph performance
+        possible_vertices = self.vertices_by_module_dependency_by_name.get(module_dependency_by_name_key, {}).get(block_type, {}).get(name, [])
         for vertex_index in possible_vertices:
             vertex = self.vertices[vertex_index]
             if self.get_dirname(vertex.path) == self.get_dirname(block_path):
@@ -477,9 +497,14 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
         vertex_index: int,
         attribute_key: str,
         attribute_value: Any,
-        change_origin_id: int,
+        change_origin_id: int | None,
         attribute_at_dest: Optional[Union[str, List[str]]],
+        transform_step: bool = False,
     ) -> None:
+        if change_origin_id is None:
+            # no need to proceed further
+            return
+
         previous_breadcrumbs = []
         attribute_at_dest = self.vertices[change_origin_id].find_attribute(attribute_at_dest)
         if attribute_at_dest:
@@ -494,14 +519,19 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
             changed_attributes = filter_sub_keys(changed_attributes)
             self.update_vertex_config(vertex, changed_attributes)
 
-    def update_vertex_config(self, vertex: TerraformBlock, changed_attributes: Union[List[str], Dict[str, Any]], dynamic_blocks: bool = False) -> None:
+    @staticmethod
+    def update_vertex_config(vertex: TerraformBlock, changed_attributes: Union[List[str], Dict[str, Any]], dynamic_blocks: bool = False) -> None:
         if not changed_attributes:
             # skip, if there is no change
             return
 
-        updated_config = deepcopy(vertex.config)
+        vertex_name = vertex.name
+        updated_config = pickle_deepcopy(vertex.config)
+        if vertex.block_type == BlockType.PROVIDER:
+            # provider blocks set the alias as a suffix to the name, ex. name: "aws.prod"
+            vertex_name = vertex_name.split(".")[0]
         if vertex.block_type != BlockType.LOCALS:
-            parts = vertex.name.split(".")
+            parts = vertex_name.split(".")
             start = 0
             end = 1
             while end <= len(parts):
@@ -510,17 +540,21 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
                     updated_config = updated_config[cur_key]
                     start = end
                 end += 1
+
         for changed_attribute in changed_attributes:
             new_value = vertex.attributes.get(changed_attribute, None)
             if new_value is not None:
                 if vertex.block_type == BlockType.LOCALS:
-                    changed_attribute = changed_attribute.replace(vertex.name + ".", "")
+                    changed_attribute = changed_attribute.replace(f"{vertex_name}.", "")
                 updated_config = update_dictionary_attribute(updated_config, changed_attribute, new_value, dynamic_blocks)
 
         if len(changed_attributes) > 0:
             if vertex.block_type == BlockType.LOCALS:
-                updated_config = updated_config.get(vertex.name)
-            update_dictionary_attribute(vertex.config, vertex.name, updated_config, dynamic_blocks)
+                updated_local_config = updated_config.get(vertex_name)
+                update_dictionary_attribute(vertex.config, vertex_name, updated_local_config, dynamic_blocks)
+                return
+
+            update_dictionary_attribute(vertex.config, vertex_name, updated_config, dynamic_blocks)
 
     def get_resources_types_in_graph(self) -> List[str]:
         return self.module.get_resources_types()
@@ -608,6 +642,9 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
 
     def _should_add_edge(self, vertex: TerraformBlock, dest_module_path: str, module_node: TerraformBlock) -> bool:
         if self.use_new_tf_parser:
+            if not vertex.source_module_object:
+                return False
+
             return (self.get_dirname(vertex.path) == dest_module_path) and \
                 (
                     vertex.source_module_object == module_node.source_module_object  # The vertex is in the same file
@@ -615,15 +652,16 @@ class TerraformLocalGraph(LocalGraph[TerraformBlock]):
                     == self.get_abspath(module_node.path)  # The vertex is in the correct dependency path)
             )
         else:
-            return (self.get_dirname(vertex.path) == dest_module_path) and \
-                (
-                    vertex.module_dependency == module_node.module_dependency  # The vertex is in the same file
-                    or self.get_abspath(vertex.module_dependency)
-                    == self.get_abspath(module_node.path)  # The vertex is in the correct dependency path
+            return (self.get_dirname(vertex.path) == dest_module_path) and (
+                vertex.module_dependency == module_node.module_dependency  # The vertex is in the same file
+                or (
+                    vertex.module_dependency is not None
+                    and self.get_abspath(vertex.module_dependency) == self.get_abspath(module_node.path)  # type:ignore[arg-type]  # old flow, will be removed
+                )  # The vertex is in the correct dependency path
             )
 
 
-def to_list(data):
+def to_list(data: Any) -> list[Any] | dict[str, Any]:
     if isinstance(data, list) and len(data) == 1 and (isinstance(data[0], str) or isinstance(data[0], int)):
         return data
     elif isinstance(data, list):
@@ -632,6 +670,20 @@ def to_list(data):
         return {key: to_list(val) for key, val in data.items()}
     else:
         return [data]
+
+
+@overload
+def update_dictionary_attribute(
+        config: dict[str, Any], key_to_update: str, new_value: Any, dynamic_blocks: bool = False
+) -> dict[str, Any]:
+    ...
+
+
+@overload
+def update_dictionary_attribute(
+        config: list[Any], key_to_update: str, new_value: Any, dynamic_blocks: bool = False
+) -> list[Any]:
+    ...
 
 
 def update_dictionary_attribute(
@@ -699,8 +751,8 @@ def get_path_with_nested_modules(block: TerraformBlock) -> str:
     if not block.module_dependency:
         return block.path
     if not strtobool(os.getenv('CHECKOV_ENABLE_NESTED_MODULES', 'True')):
-        return unify_dependency_path([block.module_dependency, block.path])
-    return get_tf_definition_key_from_module_dependency(block.path, block.module_dependency, block.module_dependency_num)
+        return unify_dependency_path([block.module_dependency, block.path])  # type:ignore[no-any-return]  # will be fixed when removing terraform/checks from mypy exclusion
+    return get_tf_definition_key_from_module_dependency(block.path, block.module_dependency, block.module_dependency_num)  # type:ignore[arg-type]  # will be fixed when removing terraform/checks from mypy exclusion
 
 
 def get_vertex_as_tf_module(block: TerraformBlock) -> TFModule:

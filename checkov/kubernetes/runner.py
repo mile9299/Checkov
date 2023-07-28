@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import os
 from typing import Type, Any, TYPE_CHECKING
-from copy import deepcopy
 
 from checkov.common.checks_infra.registry import get_graph_checks_registry
 from checkov.common.graph.checks_infra.registry import BaseRegistry
@@ -16,6 +15,7 @@ from checkov.common.output.record import Record
 from checkov.common.output.report import Report, merge_reports
 from checkov.common.bridgecrew.check_type import CheckType
 from checkov.common.runners.base_runner import BaseRunner, CHECKOV_CREATE_GRAPH
+from checkov.common.util.data_structures_utils import pickle_deepcopy
 from checkov.kubernetes.checks.resource.registry import registry
 from checkov.kubernetes.graph_builder.local_graph import KubernetesLocalGraph
 from checkov.kubernetes.graph_manager import KubernetesGraphManager
@@ -104,7 +104,7 @@ class Runner(ImageReferencerMixin[None], BaseRunner[KubernetesGraphManager]):
 
             if CHECKOV_CREATE_GRAPH and self.graph_manager:
                 logging.info("creating Kubernetes graph")
-                local_graph = self.graph_manager.build_graph_from_definitions(deepcopy(self.definitions))
+                local_graph = self.graph_manager.build_graph_from_definitions(pickle_deepcopy(self.definitions))
                 logging.info("Successfully created Kubernetes graph")
 
                 for vertex in local_graph.vertices:
@@ -174,7 +174,8 @@ class Runner(ImageReferencerMixin[None], BaseRunner[KubernetesGraphManager]):
                 # TODO? - Variable Eval Message!
                 variable_evaluations: "dict[str, Any]" = {}
 
-                report = self.mutate_kubernetes_results(results, report, k8_file, k8_file_path, file_abs_path, entity_conf, variable_evaluations)
+                report = self.mutate_kubernetes_results(results, report, k8_file, k8_file_path, file_abs_path,
+                                                        entity_conf, variable_evaluations, root_folder)
             self.pbar.update()
         self.pbar.close()
         return report
@@ -194,6 +195,7 @@ class Runner(ImageReferencerMixin[None], BaseRunner[KubernetesGraphManager]):
         file_abs_path: str,
         entity_conf: dict[str, Any],
         variable_evaluations: dict[str, Any],
+        root_folder: str | None = None
     ) -> Report:
         # Moves report generation logic out of run() method in Runner class.
         # Allows function overriding of a much smaller function than run() for other "child" frameworks such as Kustomize, Helm
